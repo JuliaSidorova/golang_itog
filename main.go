@@ -7,40 +7,39 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"runtime"
 	"strings"
-	"sync"
 )
 
 var strToFind string = "go"
 
-const k = 5
+type task struct {
+	url       string
+	count     int
+	errorText string
+}
 
-//----------------------getCount-------------------------------
-func getCount(url string, wg *sync.WaitGroup, c chan int) {
-	defer wg.Done()
+//--------------------getCount-----------------------------
+func getCount(t *task) {
 
-	resp, err := http.Get(url)
+	resp, err := http.Get(t.url)
 	if err != nil {
-		log.Fatalln(err)
+		t.errorText = err.Error()
+		return
 	}
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		log.Fatalln(err)
+		t.errorText = err.Error()
+		return
 	}
-	kolvo := strings.Count(string(body), strToFind)
-	fmt.Println("Count for", url, "-", kolvo)
-	runtime.Gosched()
-	c <- kolvo
+	t.count = strings.Count(string(body), strToFind)
 }
 
-//---------------------------main--------------------------
+//----------------------main----------------------------
 func main() {
 
-	totalKolvo := 0
-	wg := &sync.WaitGroup{}
-	c := make(chan int, k)
+	maxWorkers := 5
+	workers := 0
 
 	file, err := os.Open("url.txt")
 	if err != nil {
@@ -49,19 +48,48 @@ func main() {
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
+	taskCh := make(chan task)
+	doneCh := make(chan bool)
+	processedTaskCh := make(chan task)
+	processedDoneCh := make(chan bool)
+
+	// -------------------------------------
+	go func() {
+		totalKolvo := 0
+		for pTask := range processedTaskCh {
+			errText := ""
+			if pTask.errorText != "" {
+				errText = "Error: " + pTask.errorText
+			}
+			fmt.Println("Count for", pTask.url, "-", pTask.count, errText)
+			totalKolvo += pTask.count
+		}
+		fmt.Println("Total: ", totalKolvo)
+		processedDoneCh <- true
+	}()
+
 	for scanner.Scan() {
-		wg.Add(1)
-		go getCount(scanner.Text(), wg, c)
-		tmp := <-c
-		totalKolvo = totalKolvo + tmp
+		if workers < maxWorkers {
+			workers++
+			go func() {
+				for task := range taskCh {
+					getCount(&task)
+					processedTaskCh <- task
+				}
+				doneCh <- true
+			}()
+		}
+		url := scanner.Text()
+		taskCh <- task{url: url}
 	}
-
 	if err := scanner.Err(); err != nil {
-		log.Fatal(err)
+		log.Fatalln(err)
 	}
-	fmt.Println("Total: ", totalKolvo)
-	//
-	wg.Wait()
-}
+	close(taskCh)
 
-//---------------------------------------------------------------
+	for i := 0; i < workers; i++ {
+		<-doneCh
+	}
+	close(processedTaskCh)
+	<-processedDoneCh
+}
